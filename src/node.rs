@@ -11,21 +11,21 @@ pub struct Node {
     period: u64,
     known_nodes: Arc<Mutex<Vec<SocketAddr>>>,
     socket: Arc<UdpSocket>,
-    stopped: Arc<AtomicBool>,
+    is_alive: Arc<AtomicBool>,
 }
 
 
 impl Node {
     pub fn new(port: u16, period: u64) -> Self {
         let socket: Arc<UdpSocket> = Arc::new(UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("failed to bind host socket"));
-        let known_nodes: Arc<Mutex<Vec<SocketAddr>>> = Arc::new(Mutex::new(Vec::new()));
-        let stopped = Arc::new(AtomicBool::new(false));
+        let known_nodes = Arc::new(Mutex::new(Vec::new()));
+        let is_alive = Arc::new(AtomicBool::new(true));
 
         Self {
             period, 
             known_nodes,
             socket,
-            stopped,
+            is_alive: is_alive,
         }
     }
     
@@ -35,20 +35,18 @@ impl Node {
         if let Some(address) = connect_to {
             let address: SocketAddr = address.parse().unwrap();
             self.known_nodes.lock().unwrap().push(address);
-            let socket_copy = Arc::clone(&self.socket);
-
-            socket_copy.send_to(b"list", address).unwrap();
+            self.socket.send_to(b"list", address).unwrap();
         }
 
         let sender_thread = self.run_sender();
 
         let socket = Arc::clone(&self.socket);
-        let stopped = Arc::clone(&self.stopped);
+        let is_alive = Arc::clone(&self.is_alive);
         let known_nodes = Arc::clone(&self.known_nodes);
 
         ctrlc::set_handler(move || {
             println!("Shutting down...");
-            stopped.store(true, Ordering::SeqCst);
+            is_alive.store(false, Ordering::SeqCst);
             let known_nodes = known_nodes.lock().unwrap();
             for node_address in known_nodes.iter() {
                 socket.send_to(b"stop", node_address).unwrap();
@@ -60,41 +58,40 @@ impl Node {
     }
 
     fn run_listener(&self) -> JoinHandle<()>{
-        let listener_socket = Arc::clone(&self.socket);
-        let socket_copy = Arc::clone(&self.socket);
+        let socket = Arc::clone(&self.socket);
         let known_nodes = Arc::clone(&self.known_nodes);
-        let stopped = Arc::clone(&self.stopped);
+        let is_alive = Arc::clone(&self.is_alive);
         
-        let listener_thread = thread::spawn(move || {
+        thread::spawn(move || {
             let mut buffer = [0u8; 1024];
-            while !stopped.load(Ordering::SeqCst) {
-                match listener_socket.recv_from(&mut buffer) {
+            while is_alive.load(Ordering::SeqCst) {
+                match socket.recv_from(&mut buffer) {
                     Ok((size, address)) => {
                         let obtained_msg = String::from_utf8_lossy(&buffer[..size]).to_string();
                         let known_nodes = Arc::clone(&known_nodes);
-                        let socket_copy = Arc::clone(&socket_copy);
+                        let socket = Arc::clone(&socket);
                         thread::spawn(move || {
-                            execute_command(&obtained_msg, address, &known_nodes, &socket_copy);
+                            execute_command(&obtained_msg, address, &known_nodes, &socket);
                         }).join().unwrap();
                     }, 
                     Err(error) => {
-                        eprintln!("listener failed: {}", error);
+                        if is_alive.load(Ordering::SeqCst) {
+                            eprintln!("listener failed: {}", error);
+                        }
                     }
                 }
             }
-        });
-
-        listener_thread
+        })
     }
 
     fn run_sender(&self) -> JoinHandle<()> {
         let sender_socket = Arc::clone(&self.socket);
         let known_nodes = Arc::clone(&self.known_nodes);
         let period = self.period;
-        let stopped = Arc::clone(&self.stopped);
+        let is_alive = Arc::clone(&self.is_alive);
 
         let sender_thread = thread::spawn(move || {
-            while !stopped.load(Ordering::SeqCst) {
+            while is_alive.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_secs(period));
 
                 let mut rng = rand::thread_rng();

@@ -1,8 +1,8 @@
 use clap::Parser;
 
-mod udp_node;
+mod node;
 
-use udp_node::Node;
+use node::Node;
 
 
 #[derive(Parser)]
